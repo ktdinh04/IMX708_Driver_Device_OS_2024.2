@@ -11,9 +11,99 @@
 #include <media/v4l2-ctrls.h>
 #include <media/v4l2-event.h>
 
-// Định nghĩa các địa chỉ thanh ghi quan trọng (ví dụ, cần lấy từ datasheet/driver gốc)
-#define IMX708_REG_CHIP_ID      0x0016 // Ví dụ: Địa chỉ thanh ghi Chip ID (thường là 16-bit address)
-#define IMX708_CHIP_ID_VALUE    0x0708 // Ví dụ: Giá trị Chip ID của IMX708
+static int qbc_adjust = 2;
+module_param(qbc_adjust, int, 0644);
+MODULE_PARM_DESC(qbc_adjust, "Quad Bayer broken line correction strength [0,2-5]");
+
+#define IMX708_REG_VALUE_08BIT		1
+#define IMX708_REG_VALUE_16BIT		2
+
+/* Chip ID */
+#define IMX708_REG_CHIP_ID		0x0016
+#define IMX708_CHIP_ID			0x0708
+
+#define IMX708_REG_MODE_SELECT		0x0100
+#define IMX708_MODE_STANDBY		0x00
+#define IMX708_MODE_STREAMING		0x01
+
+#define IMX708_REG_ORIENTATION		0x101
+
+#define IMX708_INCLK_FREQ		24000000
+
+/* Default initial pixel rate, will get updated for each mode. */
+#define IMX708_INITIAL_PIXEL_RATE	590000000
+
+/* V_TIMING internal */
+#define IMX708_REG_FRAME_LENGTH		0x0340
+#define IMX708_FRAME_LENGTH_MAX		0xffff
+
+/* Long exposure multiplier */
+#define IMX708_LONG_EXP_SHIFT_MAX	7
+#define IMX708_LONG_EXP_SHIFT_REG	0x3100
+
+/* Exposure control */
+#define IMX708_REG_EXPOSURE		0x0202
+#define IMX708_EXPOSURE_OFFSET		48
+#define IMX708_EXPOSURE_DEFAULT		0x640
+#define IMX708_EXPOSURE_STEP		1
+#define IMX708_EXPOSURE_MIN		1
+#define IMX708_EXPOSURE_MAX		(IMX708_FRAME_LENGTH_MAX - \
+					 IMX708_EXPOSURE_OFFSET)
+
+/* Analog gain control */
+#define IMX708_REG_ANALOG_GAIN		0x0204
+#define IMX708_ANA_GAIN_MIN		112
+#define IMX708_ANA_GAIN_MAX		960
+#define IMX708_ANA_GAIN_STEP		1
+#define IMX708_ANA_GAIN_DEFAULT	   IMX708_ANA_GAIN_MIN
+
+/* Digital gain control */
+#define IMX708_REG_DIGITAL_GAIN		0x020e
+#define IMX708_DGTL_GAIN_MIN		0x0100
+#define IMX708_DGTL_GAIN_MAX		0xffff
+#define IMX708_DGTL_GAIN_DEFAULT	0x0100
+#define IMX708_DGTL_GAIN_STEP		1
+
+/* Colour balance controls */
+#define IMX708_REG_COLOUR_BALANCE_RED   0x0b90
+#define IMX708_REG_COLOUR_BALANCE_BLUE	0x0b92
+#define IMX708_COLOUR_BALANCE_MIN	0x01
+#define IMX708_COLOUR_BALANCE_MAX	0xffff
+#define IMX708_COLOUR_BALANCE_STEP	0x01
+#define IMX708_COLOUR_BALANCE_DEFAULT	0x100
+
+/* Test Pattern Control */
+#define IMX708_REG_TEST_PATTERN		0x0600
+#define IMX708_TEST_PATTERN_DISABLE	0
+#define IMX708_TEST_PATTERN_SOLID_COLOR	1
+#define IMX708_TEST_PATTERN_COLOR_BARS	2
+#define IMX708_TEST_PATTERN_GREY_COLOR	3
+#define IMX708_TEST_PATTERN_PN9		4
+
+/* Test pattern colour components */
+#define IMX708_REG_TEST_PATTERN_R	0x0602
+#define IMX708_REG_TEST_PATTERN_GR	0x0604
+#define IMX708_REG_TEST_PATTERN_B	0x0606
+#define IMX708_REG_TEST_PATTERN_GB	0x0608
+#define IMX708_TEST_PATTERN_COLOUR_MIN	0
+#define IMX708_TEST_PATTERN_COLOUR_MAX	0x0fff
+#define IMX708_TEST_PATTERN_COLOUR_STEP	1
+
+#define IMX708_REG_BASE_SPC_GAINS_L	0x7b10
+#define IMX708_REG_BASE_SPC_GAINS_R	0x7c00
+
+/* HDR exposure ratio (long:med == med:short) */
+#define IMX708_HDR_EXPOSURE_RATIO       4
+#define IMX708_REG_MID_EXPOSURE		0x3116
+#define IMX708_REG_SHT_EXPOSURE		0x0224
+#define IMX708_REG_MID_ANALOG_GAIN	0x3118
+#define IMX708_REG_SHT_ANALOG_GAIN	0x0216
+
+/* QBC Re-mosaic broken line correction registers */
+#define IMX708_LPF_INTENSITY_EN		0xC428
+#define IMX708_LPF_INTENSITY_ENABLED	0x00
+#define IMX708_LPF_INTENSITY_DISABLED	0x01
+#define IMX708_LPF_INTENSITY		0xC429
 
 // Cấu trúc riêng cho driver cảm biến IMX708
 struct imx708_device {
@@ -26,11 +116,6 @@ struct imx708_device {
     struct regulator *vdana; // Nguồn cấp VDDL (ví dụ)
     struct regulator *vdig; // Nguồn cấp VDIG (ví dụ)
 
-    // Thêm các trường khác cần thiết:
-    // - current_mode: Lưu trữ chế độ hoạt động hiện tại (độ phân giải, fps)
-    // - controls: V4L2 control handlers
-    // - mutex/spinlock cho các thao tác nhạy cảm
-    // - ...
 };
 
 // Hàm hỗ trợ đọc/ghi thanh ghi I2C (ví dụ đơn giản cho 16-bit address, 8-bit value)
